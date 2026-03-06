@@ -179,6 +179,12 @@ async function pushToShopify(product) {
     if (product.powerConsumptionMax) specs.push(`<li>Power Consumption (Max): ${product.powerConsumptionMax}</li>`);
     if (product.buildVolumeLength) specs.push(`<li>${buildVolumeText}</li>`);
 
+    // Add Image to description if path exists
+    const imagePath = product?.image_sds?.image?.filepath;
+    if (imagePath) {
+        specs.push(`<li>Image: <img src="https://staging.eos.info/${imagePath}" alt="Product Image"></li>`);
+    }
+
     const description = `
         <p>${product.shortDescription || ""}</p>
         <p>${product.longDescription || ""}</p>
@@ -237,12 +243,6 @@ async function pushToShopify(product) {
         }
     }
 
-    if (images.length > 0) {
-        console.log(`   📸 Found ${images.length} images for "${product.name}" (converted to base64)`);
-    } else {
-        console.log(`   📷 No images found for "${product.name}"`);
-    }
-
     const shopifyPayload = {
         product: {
             title: title,
@@ -253,13 +253,13 @@ async function pushToShopify(product) {
             variants: [
                 {
                     price: "0.00",
-                    sku: String(product.productNumber || product.id)
+                    sku: String(product.productNumber || "")
                 }
             ]
         }
     };
 
-    const currentIdValue = String(product.productNumber || product.id);
+    const currentIdValue = String(product.productNumber || "");
     console.log(`📡 Sending Product payload to Shopify for: ${title} (Ref: ${currentIdValue})`);
 
     try {
@@ -274,6 +274,17 @@ async function pushToShopify(product) {
 
         const shopifyProductId = response.data.product.id;
 
+        // Fetch the Media Gid (for the "bubble" effect)
+        console.log(`🔎 Fetching Media Gid for product: ${title}...`);
+        const productInfo = await checkProductExistsBySku(currentIdValue);
+        const imageGid = productInfo?.imageGid || null;
+
+        // Clean Highlight Text
+        const cleanedHighlightText = String(product.shortDescription || "N/A")
+            .replace(/<\/?[^>]+(>|$)/g, "") // Strip HTML
+            .replace(/\r?\n|\r/g, " ")       // Replace newlines with space
+            .trim();
+
         // METAFIELD CREATION LOGIC
         const metafields = [
             {
@@ -285,7 +296,19 @@ async function pushToShopify(product) {
             {
                 namespace: "custom",
                 key: "build_volume",
-                value: `<p>${buildVolumeText}</p>`,
+                value: `<p>${product.buildVolumeLength}</p>`,
+                type: "single_line_text_field"
+            },
+            {
+                namespace: "custom",
+                key: "build_volume_height",
+                value: `<p>${product.buildVolumeHeight}</p>`,
+                type: "single_line_text_field"
+            },
+            {
+                namespace: "custom",
+                key: "build_volume_width",
+                value: `<p>${product.buildVolumeWidth}</p>`,
                 type: "single_line_text_field"
             },
             {
@@ -296,8 +319,14 @@ async function pushToShopify(product) {
             },
             {
                 namespace: "custom",
+                key: "power_consumption_typical",
+                value: `<p>${product.powerConsumptionTypical}</p>`,
+                type: "single_line_text_field"
+            },
+            {
+                namespace: "custom",
                 key: "power_consumption",
-                value: `<p>${product.powerConsumptionMax || product.powerConsumptionTypical ? `max ${product.powerConsumptionMax || "N/A"} kw / average ${product.powerConsumptionTypical || "N/A"} kw` : "N/A"}</p>`,
+                value: `<p>${product.powerConsumptionMax}</p>`,
                 type: "single_line_text_field"
             },
             {
@@ -315,8 +344,8 @@ async function pushToShopify(product) {
             {
                 namespace: "custom",
                 key: "highlight_text",
-                value: `${String(product.shortDescription || "N/A")}`,
-                type: "multi_line_text_field"
+                value: cleanedHighlightText,
+                type: "single_line_text_field"
             },
             {
                 namespace: "custom",
@@ -329,14 +358,17 @@ async function pushToShopify(product) {
                 key: "f_theta_lense",
                 value: `${String(product.fThetaLenseCount || "N/A")}`,
                 type: "single_line_text_field"
-            },
-            {
-                namespace: "custom",
-                key: "image",
-                value: `${String(product?.image_sds?.image?.filepath || "N/A")}`,
-                type: "file_reference"
-            },
+            }
         ];
+
+        if (imageGid) {
+            metafields.push({
+                namespace: "my_fields",
+                key: "image",
+                value: imageGid,
+                type: "file_reference"
+            });
+        }
 
         console.log(`   🛠️  Attaching ${metafields.length} metafields to Product ID: ${shopifyProductId}...`);
 
@@ -380,6 +412,11 @@ async function checkProductExistsBySku(sku) {
                 product {
                   id
                   title
+                  media(first: 1) {
+                    nodes {
+                      id
+                    }
+                  }
                 }
               }
             }
@@ -399,9 +436,13 @@ async function checkProductExistsBySku(sku) {
             }
         );
 
-        const variants = response.data?.data?.productVariants?.edges || [];
-        if (variants.length > 0) {
-            return variants[0].node.product;
+        const edge = response.data?.data?.productVariants?.edges[0];
+        if (edge) {
+            return {
+                id: edge.node.product.id,
+                title: edge.node.product.title,
+                imageGid: edge.node.product.media.nodes[0]?.id || null
+            };
         }
         return null;
     } catch (error) {
